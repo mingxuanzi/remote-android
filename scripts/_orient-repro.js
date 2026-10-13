@@ -1,7 +1,7 @@
 /* 复现:PATCH 方向 → rtc/start → WHEP 探测 → 抓日志 */
 const { Client } = require('ssh2')
 const cfg = require('../publish.config.js')
-const BASE = 'http://192.168.0.40:8443'
+const BASE = process.env.RA_BASE || `http://${cfg.host}:8443`
 
 function sshNode(code) {
   return new Promise((resolve, reject) => {
@@ -62,7 +62,7 @@ async function main() {
   await sshNode(userCode(false))
   const login = await fetch(`${BASE}/api/auth/login`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username: 'smoketest', password: 'smoke123456' })
+    body: JSON.stringify({ username: process.env.RA_SMOKE_USER || 'smoketest', password: process.env.RA_SMOKE_PASSWORD || '' })
   })
   const { token } = await login.json()
   const auth = { Authorization: `Bearer ${token}` }

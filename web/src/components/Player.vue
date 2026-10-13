@@ -45,8 +45,11 @@ const connected = ref(false);
 const overlayText = ref('正在连接推流…');
 const dragging = ref(false);
 const text = ref('');
-const devW = ref(props.instance.width);
-const devH = ref(props.instance.height);
+/** 初始画布按方向模式取实例规格:landscape 时视频流宽高互换,避免等 WS meta
+ *  的数秒里画面框先竖屏后跳横屏(meta 到达后仍会以实测值校正) */
+const landscape = props.instance.orientation === 'landscape';
+const devW = ref(landscape ? props.instance.height : props.instance.width);
+const devH = ref(landscape ? props.instance.width : props.instance.height);
 const useWebCodecs = hasWebCodecs; // HTTP 非安全上下文 → broadway 软解
 
 /** 画布尺寸按宽高比自适应:竖屏限宽 420px,横屏放宽到 780px */

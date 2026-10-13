@@ -1,4 +1,5 @@
 import { RawData } from 'ws';
+import type { VideoReplay } from './replay';
 
 /** 前端上行控制指令(与协议版本无关) */
 export interface TouchMsg { t: 'touch'; action: number; id?: number; x: number; y: number; }
@@ -21,6 +22,8 @@ export interface StreamSession {
   once(event: string, listener: (...args: any[]) => void): this;
   /** WS 模式才有视频帧(RTC 模式视频走 MediaMTX) */
   readonly hasVideoFrames: boolean;
+  /** GOP 回放缓冲(配置包+最近一个 GOP),新观众入场先回放再进直播,防止黑屏 */
+  readonly videoReplay: VideoReplay;
 }
 
 /* ---------------- scrcpy 1.25 控制协议 ----------------

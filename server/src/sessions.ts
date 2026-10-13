@@ -1,5 +1,5 @@
 import { WebSocket } from 'ws';
-import { ScrcpySession } from './scrcpy';
+import { ScrcpySession, frameToWire } from './scrcpy';
 import { Scrcpy2Session } from './scrcpy2';
 import { RtcSession } from './rtc';
 import { InstanceRow } from './db';
@@ -110,6 +110,16 @@ export async function acquire(instance: InstanceRow, mode: StreamMode, viewer?: 
     entry.idleTimer = undefined;
   }
   if (viewer) {
+    // 新观众先回放"配置包+最近一个 GOP"再进直播:
+    // scrcpy 的配置包只在流开始发一次,且 redroid 编码器不产周期 IDR,
+    // bootstrap 期间(视频已推流但观众未就位)丢掉的"配置+首个 IDR"无法自然恢复 → 黑屏
+    if (entry.session.hasVideoFrames) {
+      for (const f of entry.session.videoReplay.frames()) {
+        if (viewer.readyState !== WebSocket.OPEN) break;
+        const packet = mode === 'v2' ? wireFrame(1, f.ptsAndFlags, f.payload) : frameToWire(f);
+        viewer.send(packet);
+      }
+    }
     entry.viewers.add(viewer);
     // rtc:观众(重)接入且距上次重启已久 → 热切换产新 IDR(读者起解的确定性信号;
     // 冷却期内不触发,避免和方向切换的热重启撞车)

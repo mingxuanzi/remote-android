@@ -5,6 +5,7 @@ import { ClientMsg, StreamSession } from './control';
 import { Scrcpy2Session } from './scrcpy2';
 import { RtspPublisher } from './rtsp';
 import { H264RtpPacketizer, extractSpsPps, ptsToTs90 } from './rtp';
+import { VideoReplay } from './replay';
 
 const CONFIG_FLAG = 1n << 63n;
 const KEYFRAME_FLAG = 1n << 62n;
@@ -24,8 +25,10 @@ const PTS_MASK = ~(CONFIG_FLAG | KEYFRAME_FLAG);
  *  - 发布通道被 MediaMTX 读超时杀掉后,下一帧到达时自动重建
  */
 export class RtcSession extends EventEmitter implements StreamSession {
+  static gen = 0; // 路径代次:每次会话新建递增,避免同路径换发布方(MediaMTX 对此不可靠)
   readonly instance: InstanceRow;
   readonly hasVideoFrames = false; // 视频走 WebRTC,不经 WS
+  readonly videoReplay = new VideoReplay(); // 不喂帧:RTC 视频不经 WS,无需回放
   meta: { width: number; height: number; codec: string } | null = null;
   readonly whepPath: string;
 
@@ -42,7 +45,13 @@ export class RtcSession extends EventEmitter implements StreamSession {
   private suppressInnerClose = false;
   private lastIdrRestartAt = 0;
   private lastKeyframe: Buffer | null = null; // 最近的 IDR(供新观众即时起解)
+  private lastSentAt = 0; // 最近一次向发布通道发帧(发布就绪补发/PLI 重放/巡检补发都计入)
+  private pollTimer?: NodeJS.Timeout;
   private closed = false;
+  /** 首帧发布完成的信号:rtc/start 等它再下发 whepUrl,避免前端落入
+   *  "路径未发布 → 404 重试 → 挂上时错过首发 IDR → 看门狗误触发"的启动竞赛 */
+  private firstPublishResolve!: () => void;
+  readonly firstPublishPromise: Promise<void>;
   /* ---- 帧计数诊断(定位黑屏卡点) ---- */
   private dbgFrames = 0;
   private dbgKey = 0;
@@ -52,7 +61,10 @@ export class RtcSession extends EventEmitter implements StreamSession {
   private constructor(instance: InstanceRow) {
     super();
     this.instance = instance;
-    this.whepPath = `ra-${instance.id}`;
+    // 唯一路径:方向热重配/会话重建都是"新会话 + 新路径",MediaMTX 永不出现
+    // 同路径换发布方(旧发布方僵死导致新观众零数据的坑)
+    this.whepPath = `ra-${instance.id}-${(++RtcSession.gen).toString(36)}`;
+    this.firstPublishPromise = new Promise((r) => { this.firstPublishResolve = r; });
   }
 
   static async start(instance: InstanceRow): Promise<RtcSession> {
@@ -69,6 +81,12 @@ export class RtcSession extends EventEmitter implements StreamSession {
     await this.startInner();
     this.emit('meta', this.meta);
     this.log('session ready');
+    // 路径保温:画面静止时 redroid 编码器不再出帧,而 MediaMTX 又不会向
+    // RTSP 发布方请求关键帧(实测 WHEP 观众接入也零 PLI),晚进/切换后接入的
+    // 读者会永久黑屏。周期性补发最近 IDR(代价仅 ~30-50KB/s/路的背景流量),
+    // 保证任何时刻挂上路径的读者 2.5s 内必得关键帧
+    this.pollTimer = setInterval(() => this.keepWarm(), 2_000);
+    this.pollTimer.unref?.();
   }
 
   /** 启动/重启采集端(scrcpy 2.4 三通道)。
@@ -110,14 +128,9 @@ export class RtcSession extends EventEmitter implements StreamSession {
     });
   }
 
-  /** 观众接入时的温和起解:距上次重启超过 cooldownMs 才热切换(产新 IDR)。
-   *  与 PLI 无关的确定性机制——读者接入信号来自我们自己的控制 WS。
-   *  注意:只做采集端热切换,不动发布通道(同路径换发布方在 MediaMTX 上不可靠)。 */
-  restartIfIdle(cooldownMs = 5_000): void {
-    if (this.closed || this.restarting) return;
-    if (Date.now() - this.lastIdrRestartAt < cooldownMs) return;
-    this.log('观众接入且长时间无新 IDR,热切换产新 IDR');
-    void this.restartCapture();
+  /** 观众接入信号:已挂载读者立刻补发一帧 IDR(新读者则由保温循环覆盖) */
+  restartIfIdle(_cooldownMs = 5_000): void {
+    this.replayKeyframe('观众接入');
   }
 
   /** 新观众接入/方向热重配:零间断热切换——
@@ -209,14 +222,11 @@ export class RtcSession extends EventEmitter implements StreamSession {
         if (payload.length < 2) return;
         const pt = payload[1];
         const fmt = payload[0] & 0x1f;
-        const isPli = pt === 205 && fmt === 1; // PSFB PLI
+        const isPli = pt === 206 && fmt === 1; // PSFB PLI(原写成 RTPFB 205,实测从未命中)
         const isFir = pt === 192;              // FIR(full intra request)
         if (!isPli && !isFir) return;
         if (this.lastKeyframe && this.publishing) {
-          const ts = ptsToTs90(BigInt(Date.now()) * 1000n);
-          for (const pkt of this.packetizer.packetize(this.lastKeyframe, ts)) {
-            rtsp.sendInterleaved(0, pkt);
-          }
+          this.replayKeyframe(`收到 ${isPli ? 'PLI' : 'FIR'}`);
           this.log(`收到 ${isPli ? 'PLI' : 'FIR'},已重放缓存 IDR(${(this.lastKeyframe.length / 1024).toFixed(1)}KB)`);
           return;
         }
@@ -251,7 +261,12 @@ export class RtcSession extends EventEmitter implements StreamSession {
       if (stale()) { rtsp.close(); return; }
       this.rtsp = rtsp;
       this.publishing = true;
+      this.firstPublishResolve();
       this.log(`RTSP 发布已建立 → ${base}`);
+      // 发布握手期间到达的首个 IDR 会被 sendFrame 丢弃(它只负责触发发布),
+      // 而 redroid 编码器在画面静止后再不出帧 —— 不补发会让路径永远零字节,
+      // WHEP 观众连得上却收不到任何媒体(黑屏)。就绪后立即补发缓存 IDR。
+      if (this.lastKeyframe) this.replayKeyframe('发布就绪');
     } catch (e) {
       rtsp.close();
       this.log(`RTSP 发布失败(5s 后重试): ${e instanceof Error ? e.message : e}`);
@@ -261,6 +276,25 @@ export class RtcSession extends EventEmitter implements StreamSession {
     } finally {
       this.publishStarting = false;
     }
+  }
+
+  /** 向发布通道补发缓存的最近 IDR(所有已挂载读者即时起解;等价于此刻出了新关键帧) */
+  private replayKeyframe(why: string): void {
+    if (!this.rtsp || !this.lastKeyframe || !this.publishing) return;
+    const ts = ptsToTs90(BigInt(Date.now()) * 1000n);
+    const pkts = this.packetizer.packetize(this.lastKeyframe, ts);
+    for (const pkt of pkts) this.rtsp.sendInterleaved(0, pkt);
+    this.dbgSentPkts += pkts.length;
+    this.lastSentAt = Date.now();
+    this.log(`${why},补发缓存 IDR(${pkts.length} 个 RTP 包)`);
+  }
+
+  /** 路径保温:静默超 1.5s 且缓存有 IDR → 周期性补发,晚进观众无需任何信令即可起解 */
+  private keepWarm(): void {
+    if (this.closed || !this.publishing || !this.rtsp?.isAlive()) return;
+    if (!this.lastKeyframe) return;
+    if (Date.now() - this.lastSentAt < 1_500) return;
+    this.replayKeyframe('路径保温');
   }
 
   /** 时间戳统一用墙钟;发布通道死了就在下一帧自愈重建 */
@@ -281,6 +315,7 @@ export class RtcSession extends EventEmitter implements StreamSession {
       this.dbgSentPkts++;
       this.rtsp.sendInterleaved(0, pkt);
     }
+    this.lastSentAt = Date.now();
   }
 
   dispatchControl(msg: ClientMsg): void {
@@ -294,6 +329,8 @@ export class RtcSession extends EventEmitter implements StreamSession {
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    if (this.pollTimer) clearInterval(this.pollTimer);
+    this.firstPublishResolve(); // 放等在 firstPublishPromise 上的 rtc/start 继续,由它超时兜底
     this.log('session close()');
     this.rtsp?.close();
     this.inner?.close();

@@ -49,8 +49,11 @@ const dragging = ref(false);
 /** 默认静音:浏览器禁止带声自动播放,未静音 autoplay 会被拦截导致黑屏;
  *  用户点"取消静音"(真实手势)时再出声 */
 const muted = ref(true);
-const devW = ref(props.instance.width);
-const devH = ref(props.instance.height);
+/** 初始画布按方向模式取实例规格:landscape 时视频流宽高互换,避免等 meta
+ *  的数秒里画面框先竖屏后跳横屏(meta 到达后仍会以实测值校正) */
+const landscape = props.instance.orientation === 'landscape';
+const devW = ref(landscape ? props.instance.height : props.instance.width);
+const devH = ref(landscape ? props.instance.width : props.instance.height);
 
 /** 画布尺寸按宽高比自适应:竖屏限宽 420px,横屏放宽到 780px */
 const screenStyle = computed(() => ({
@@ -102,8 +105,8 @@ async function start(): Promise<void> {
   needRetry.value = false;
   overlay.value = '正在建立 WebRTC 连接…';
 
-  // 1. 预热后端会话(scrcpy 2.4 → JS RTP → MediaMTX),幂等
-  const { whepUrl } = await api.rtcStart(props.instance.id);
+  // 1. 预热后端会话(scrcpy 2.4 → JS RTP → MediaMTX;服务端会等到首发 IDR 补发完才返回),幂等
+  let { whepUrl } = await api.rtcStart(props.instance.id);
 
   // 2. WHEP 协商(MediaMTX 非 trickle,服务端等 ICE 候选收齐);流未就绪时 404,重试
   //  必须同时带 video+audio 两个 recvonly m-line:实测 MediaMTX 1.9.3 对单视频 m-line
@@ -146,12 +149,13 @@ async function start(): Promise<void> {
     pc.close();
     pc = null;
 
-    // 连续失败 → 后端会话可能处于坏状态,硬重置一次(销毁重建)
+    // 连续失败 → 后端会话可能处于坏状态,硬重置一次(销毁重建;路径代次会变,必须换新地址)
     if (attempt === 8 && !resetDone) {
       resetDone = true;
       overlay.value = '推流会话异常,正在重建…';
       await api.rtcReset(props.instance.id).catch(() => void 0);
       await new Promise((r) => setTimeout(r, 3_000));
+      whepUrl = (await api.rtcStart(props.instance.id)).whepUrl;
       continue;
     }
 
@@ -169,7 +173,8 @@ function retryLater(): void {
   setTimeout(() => { if (!destroyed) void start().catch(() => void 0); }, 3_000);
 }
 
-/** 候选不可达时 MediaMTX 会"已建立但零媒体",看门狗 6s 无帧即重连换候选 */
+/** 候选不可达时 MediaMTX 会"已建立但零媒体",看门狗 10s 无帧即重连换候选。
+ *  10s 而非 6s:首启时"等保温 IDR"是合法等待,6s 太紧会误触发一次重连才能出图 */
 let watchdog = 0;
 function armWatchdog(): void {
   window.clearTimeout(watchdog);
@@ -182,7 +187,7 @@ function armWatchdog(): void {
     pc?.close();
     pc = null;
     setTimeout(() => { if (!destroyed) void start().catch(() => void 0); }, 1_000);
-  }, 6_000);
+  }, 10_000);
 }
 
 /* ---------- 触控(Pointer Events:鼠标/触屏统一) ---------- */

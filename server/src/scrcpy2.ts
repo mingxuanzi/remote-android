@@ -6,6 +6,7 @@ import { adb, serialOf, waitForBoot } from './adb';
 import { lockOrientationValue } from './docker';
 import { InstanceRow } from './db';
 import { ClientMsg, encodeV2, StreamSession } from './control';
+import { VideoReplay } from './replay';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -29,6 +30,7 @@ type AudioState = 'codecMeta' | 'header' | 'payload';
 export class Scrcpy2Session extends EventEmitter implements StreamSession {
   readonly instance: InstanceRow;
   readonly hasVideoFrames = true;
+  readonly videoReplay = new VideoReplay();
   meta: { width: number; height: number; codec: string } | null = null;
 
   private videoSocket?: net.Socket;
@@ -202,6 +204,7 @@ export class Scrcpy2Session extends EventEmitter implements StreamSession {
         };
         this.vBuf = this.vBuf.subarray(this.vSize);
         this.vState = 'header';
+        this.videoReplay.push(frame.ptsAndFlags, frame.payload);
         this.emit('videoFrame', frame);
       }
     }

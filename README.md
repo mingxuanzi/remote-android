@@ -1,6 +1,6 @@
 # RemoteAndroid — 云端安卓模拟器多开管理平台
 
-对标网易 UU/MuMu 模拟器的 Web 化管理形态:从浏览器创建、启动、停止、批量多开安卓模拟器实例,实时投屏 + 触控操作,支持宿主机 GPU 渲染,整套平台支持 Docker Compose 一键部署。
+在浏览器里创建、启动、停止、批量多开安卓模拟器实例:实时投屏 + 触控操作,支持宿主机 GPU 渲染,整套平台支持 Docker Compose 一键部署。
 
 ## 架构
 
@@ -87,8 +87,8 @@ npm run publish    # 一键发布
 
 | 入口 | 说明 |
 |---|---|
-| `http://192.168.0.40:8443` | HTTP:视频自动降级 WASM 软解(Broadway),帧率略低 |
-| `https://192.168.0.40:8443` | HTTPS(容器启动时自签证书,CN/SAN=NAS IP,持久化在 `RemoteAndroid/certs/`):浏览器点"高级→继续前往"信任一次即可,WebCodecs 硬解 + AudioWorklet 全开,体验对标桌面模拟器 |
+| `http://<NAS-IP>:8443` | HTTP:视频自动降级 WASM 软解(Broadway),帧率略低 |
+| `https://<NAS-IP>:8443` | HTTPS(容器启动时自签证书,CN/SAN=NAS IP,持久化在 `RemoteAndroid/certs/`):浏览器点"高级→继续前往"信任一次即可,WebCodecs 硬解 + AudioWorklet 全开,体验接近桌面模拟器 |
 
 NAS 侧目录结构:
 
@@ -104,6 +104,29 @@ NAS 侧目录结构:
 > ✅ **已验证**:fnOS 内核(6.18.18.c1107-trim)把 binder **编译进内核**(非模块),`/dev/binder`、`/dev/binderfs` 开箱就有,redroid 实例可正常启动、投屏。
 > ✅ NAS 的 Docker 已配好国内镜像加速器(发布脚本不依赖,但 NAS 自行拉镜像时需要)。
 > ⚠️ 在 NAS 上重启 docker 服务后,`ra-api` 容器内的 `docker.sock` 挂载会失效,需要 `docker restart ra-api` 一次。
+
+## 免构建:直接下载 Release 镜像
+
+推送 `v*` tag 后,GitHub Actions 会自动构建 `api` / `web` 镜像并发布到 [Releases](../../releases):
+
+| 产物 | 说明 |
+|---|---|
+| `remote-android-{api,web}-<tag>-amd64.tar.gz` | 离线镜像包,`docker load -i` 加载后直接使用 |
+| `docker-compose.release.yml` | 已引用上述镜像 tag 的 compose 文件,与镜像包放同一目录即可 |
+
+```bash
+# 以 v0.0.66 为例:下载镜像包 + docker-compose.release.yml 后
+docker load -i remote-android-api-v0.0.66-amd64.tar.gz
+docker load -i remote-android-web-v0.0.66-amd64.tar.gz
+docker compose -f docker-compose.release.yml up -d
+```
+
+网络可达 ghcr.io 的话,也可以直接拉取(支持 linux/amd64、linux/arm64):
+
+```bash
+docker pull ghcr.io/mingxuanzi/remote-android/api:v0.0.66
+docker pull ghcr.io/mingxuanzi/remote-android/web:v0.0.66
+```
 
 ## 本机开发
 
@@ -128,7 +151,7 @@ cd web && npm install && npm run dev           # http://localhost:5173(已配置
 
 | 模式 | 说明 |
 |---|---|
-| `host` | 宿主机硬件 GPU 渲染(挂载 `/dev/dri`),流畅度对标真机/桌面模拟器 |
+| `host` | 宿主机硬件 GPU 渲染(挂载 `/dev/dri`),流畅度接近真机/桌面模拟器 |
 | `guest` | SwiftShader 纯 CPU 软渲染,无需任何 GPU,兼容性最好但帧率低 |
 
 多实例共享同一块 GPU,密度瓶颈主要在显存与编码器。

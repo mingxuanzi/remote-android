@@ -6,8 +6,8 @@ import multer from 'multer';
 import { config } from './config';
 import { instanceStore, templateStore, userStore, InstanceRow, newId } from './db';
 import {
-  createAndStart, startContainer, stopContainer, removeContainer, inspectState,
-  describeError, commitInstance, removeImage, reconcileStatus,
+  createAndStart, stopContainer, removeContainer, inspectState,
+  describeError, commitInstance, removeImage, reconcileStatus, launchInstance,
 } from './docker';
 import { adbInstall, serialOf, waitForBoot } from './adb';
 import {
@@ -141,11 +141,16 @@ router.post('/instances/:id/start', (req, res) => {
   instanceStore.setStatus(row.id, 'starting');
   void (async () => {
     try {
-      await startContainer(row.name);
+      await launchInstance({
+        name: row.name, image: row.image,
+        width: row.width, height: row.height, dpi: row.dpi, gpuMode: row.gpuMode,
+        cpus: row.cpus, memoryMb: row.memoryMb,
+      });
       instanceStore.setStatus(row.id, 'running');
     } catch (e) {
-      const st = await inspectState(row.name).catch(() => 'missing');
-      instanceStore.setStatus(row.id, st === 'running' ? 'running' : 'error', describeError(e));
+      const st = await inspectState(row.name).catch(() => 'unknown' as const);
+      if (st === 'running') instanceStore.setStatus(row.id, 'running');
+      else instanceStore.setStatus(row.id, 'error', describeError(e));
     }
   })();
   res.json({ ok: true, status: 'starting' });
@@ -164,7 +169,7 @@ router.post('/instances/:id/stop', (req, res) => {
       await stopContainer(row.name);
       instanceStore.setStatus(row.id, 'stopped');
     } catch (e) {
-      const st = await inspectState(row.name).catch(() => 'missing');
+      const st = await inspectState(row.name).catch(() => 'unknown' as const);
       if (st !== 'running') instanceStore.setStatus(row.id, 'stopped');
       else instanceStore.setStatus(row.id, 'error', describeError(e));
     }
@@ -180,11 +185,16 @@ router.post('/instances/:id/restart', (req, res) => {
   void (async () => {
     try {
       await stopContainer(row.name).catch(() => void 0);
-      await startContainer(row.name);
+      await launchInstance({
+        name: row.name, image: row.image,
+        width: row.width, height: row.height, dpi: row.dpi, gpuMode: row.gpuMode,
+        cpus: row.cpus, memoryMb: row.memoryMb,
+      });
       instanceStore.setStatus(row.id, 'running');
     } catch (e) {
-      const st = await inspectState(row.name).catch(() => 'missing');
-      instanceStore.setStatus(row.id, st === 'running' ? 'running' : 'error', describeError(e));
+      const st = await inspectState(row.name).catch(() => 'unknown' as const);
+      if (st === 'running') instanceStore.setStatus(row.id, 'running');
+      else instanceStore.setStatus(row.id, 'error', describeError(e));
     }
   })();
   res.json({ ok: true, status: 'restarting' });
@@ -217,11 +227,16 @@ router.post('/instances/batch', (req, res) => {
       instanceStore.setStatus(id, 'starting');
       void (async () => {
         try {
-          await startContainer(row.name);
+          await launchInstance({
+            name: row.name, image: row.image,
+            width: row.width, height: row.height, dpi: row.dpi, gpuMode: row.gpuMode,
+            cpus: row.cpus, memoryMb: row.memoryMb,
+          });
           instanceStore.setStatus(id, 'running');
         } catch (e) {
-          const st = await inspectState(row.name).catch(() => 'missing');
-          instanceStore.setStatus(id, st === 'running' ? 'running' : 'error', describeError(e));
+          const st = await inspectState(row.name).catch(() => 'unknown' as const);
+          if (st === 'running') instanceStore.setStatus(id, 'running');
+          else instanceStore.setStatus(id, 'error', describeError(e));
         }
       })();
     } else if (action === 'stop') {
@@ -232,7 +247,7 @@ router.post('/instances/batch', (req, res) => {
           await stopContainer(row.name);
           instanceStore.setStatus(id, 'stopped');
         } catch (e) {
-          const st = await inspectState(row.name).catch(() => 'missing');
+          const st = await inspectState(row.name).catch(() => 'unknown' as const);
           if (st !== 'running') instanceStore.setStatus(id, 'stopped');
           else instanceStore.setStatus(id, 'error', describeError(e));
         }
@@ -296,6 +311,12 @@ router.post('/instances/:id/rtc/start', async (req, res) => {
   try {
     const entry = await ensure(row, 'rtc');
     const session = entry.session as RtcSession;
+    // 等首帧发布(首发 IDR 已补发)再下发地址,否则前端 WHEP 会落入
+    // "路径未发布 → 404 重试 → 挂上时错过首发 IDR → 看门狗误触发"的启动竞赛
+    await Promise.race([
+      session.firstPublishPromise,
+      new Promise((r) => setTimeout(r, 8_000)),
+    ]);
     // MediaMTX 的 WHEP 路径形态是 /<path>/whep(不是 /whep/<path>)
     res.json({ whepUrl: `/${session.whepPath}/whep` });
   } catch (e) {

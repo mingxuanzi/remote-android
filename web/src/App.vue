@@ -2,7 +2,7 @@
   <el-container class="layout">
     <el-header class="header" height="auto">
       <span class="logo" @click="$router.push('/')">📱 RemoteAndroid 云模拟器</span>
-      <el-tag size="small" type="info" class="subtitle">对标 UU 模拟器的 Web 化多开平台</el-tag>
+      <el-tag size="small" type="info" class="subtitle">Web 端安卓模拟器多开平台:一键创建 · 实时投屏 · 批量管理</el-tag>
       <div class="spacer" />
       <el-button
         circle :icon="theme.isDark ? Sunny : Moon"

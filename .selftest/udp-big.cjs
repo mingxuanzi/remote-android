@@ -1,10 +1,11 @@
 const { Client } = require('ssh2');
 const cfg = require('../publish.config.js');
+const TARGET = process.env.RA_TARGET_HOST || '127.0.0.1';
 const c = new Client();
 c.on('ready', () => {
   c.exec("sudo -S -p '' /bin/sh", (e, s) => {
     if (e) { console.log(e.message); process.exit(1); }
-    s.end(cfg.password + "\npython3 -c \"import socket; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.sendto(b'A'*1400, ('192.168.0.2',9999)); s.sendto(b'B'*100, ('192.168.0.2',9999)); print('sent')\" 2>&1 || echo no-python3\n");
+    s.end(cfg.password + `\npython3 -c "import socket; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.sendto(b'A'*1400, ('${TARGET}',9999)); s.sendto(b'B'*100, ('${TARGET}',9999)); print('sent')" 2>&1 || echo no-python3\n`);
     s.on('data', d => process.stdout.write(d));
     s.stderr.on('data', d => process.stdout.write(d));
     s.on('close', () => { c.end(); process.exit(0); });

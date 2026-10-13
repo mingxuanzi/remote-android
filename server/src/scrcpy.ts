@@ -6,9 +6,9 @@ import { adb, serialOf, waitForBoot } from './adb';
 import { lockOrientationValue } from './docker';
 import { InstanceRow } from './db';
 import { ClientMsg, encodeV1, StreamSession } from './control';
+import { VideoReplay, CONFIG_FLAG, KEYFRAME_FLAG } from './replay';
 
-export const CONFIG_FLAG = 1n << 63n; // 配置包(SPS/PPS)
-export const KEYFRAME_FLAG = 1n << 62n;
+export { CONFIG_FLAG, KEYFRAME_FLAG };
 
 export interface Frame {
   /** 原始 8 字节 ptsAndFlags(含 config/keyframe 标志位),原样转发给前端 */
@@ -40,6 +40,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 export class ScrcpySession extends EventEmitter implements StreamSession {
   readonly instance: InstanceRow;
   readonly hasVideoFrames = true; // 视频经 WS 二进制帧下发
+  readonly videoReplay = new VideoReplay();
   meta: VideoMeta | null = null;
 
   private videoSocket?: net.Socket;
@@ -187,6 +188,7 @@ export class ScrcpySession extends EventEmitter implements StreamSession {
         };
         this.buf = this.buf.subarray(this.pendingSize);
         this.state = 'header';
+        this.videoReplay.push(frame.ptsAndFlags, frame.payload);
         this.emit('frame', frame);
       }
     }

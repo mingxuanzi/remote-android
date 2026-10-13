@@ -5,8 +5,9 @@ const { Client } = require('ssh2');
 const fs = require('fs');
 const cfg = require('../publish.config.js');
 
-const BASE = 'https://192.168.0.40:8443';
-const API = 'http://192.168.0.40:8443'; // node 侧 API 走 HTTP,绕开自签证书校验
+const HOST = process.env.RA_HOST || cfg.host || '127.0.0.1';
+const BASE = `https://${HOST}:8443`;
+const API = `http://${HOST}:8443`; // node 侧 API 走 HTTP,绕开自签证书校验
 const CHROME = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 
 function sshNode(code) {
