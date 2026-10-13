@@ -2,7 +2,7 @@ name: Release
 
 # 推送 v* tag 时自动构建 api/web 镜像:
 #   1. 多架构镜像推送到 GHCR(ghcr.io/<owner>/remote-android/{api,web}:<tag>)
-#   2. amd64 离线镜像包上传至 GitHub Release,供直接下载 docker load
+#   2. amd64 离线镜像包 + 现成 compose 文件上传 GitHub Release,供直接下载 docker load
 on:
   push:
     tags:
@@ -17,8 +17,19 @@ env:
   REGISTRY: ghcr.io
 
 jobs:
+  prepare:
+    name: 创建 Release 占位
+    runs-on: ubuntu-latest
+    steps:
+      - name: 创建 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+
   build:
     name: 构建 ${{ matrix.name }} 镜像
+    needs: prepare
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -77,28 +88,8 @@ jobs:
           docker save "$IMG" | gzip > "$OUT"
           echo "已导出 $OUT ($(du -h "$OUT" | cut -f1))"
 
-      - name: 上传离线包(构建产物)
-        uses: actions/upload-artifact@v4
-        with:
-          name: image-${{ matrix.image }}
-          path: remote-android-${{ matrix.image }}-${{ github.ref_name }}-amd64.tar.gz
-          retention-days: 7
-
-  release:
-    name: 创建 GitHub Release
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - name: 检出代码
-        uses: actions/checkout@v4
-
-      - name: 下载全部镜像离线包
-        uses: actions/download-artifact@v4
-        with:
-          path: dist
-          merge-multiple: true
-
-      - name: 生成 Release 专用 compose 文件
+      - name: 生成 Release 专用 compose 文件(api)
+        if: matrix.image == 'api'
         run: |
           set -euo pipefail
           sed -e "s|build: ./server|image: ${{ env.REGISTRY }}/${{ github.repository }}/api:${{ github.ref_name }}|" \
@@ -106,12 +97,15 @@ jobs:
               docker-compose.yml > docker-compose.release.yml
           grep -n "image:" docker-compose.release.yml
 
-      - name: 创建 Release 并上传镜像文件
+      - name: 上传镜像离线包到 Release
         uses: softprops/action-gh-release@v2
         with:
-          name: ${{ github.ref_name }}
-          generate_release_notes: true
           fail_on_unmatched_files: true
-          files: |
-            dist/*.tar.gz
-            docker-compose.release.yml
+          files: remote-android-${{ matrix.image }}-${{ github.ref_name }}-amd64.tar.gz
+
+      - name: 上传 compose 文件到 Release(仅 api 任务)
+        if: matrix.image == 'api'
+        uses: softprops/action-gh-release@v2
+        with:
+          fail_on_unmatched_files: true
+          files: docker-compose.release.yml
