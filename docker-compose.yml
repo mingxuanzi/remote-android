@@ -1,0 +1,68 @@
+name: remote-android
+
+networks:
+  # 固定网络名:redroid 实例由 api 动态创建时也加入这个网络,
+  # api 通过 http://<实例名>:5555 (adb over tcp) 直连实例
+  remote-android-net:
+    name: remote-android-net
+    driver: bridge
+
+services:
+  api:
+    build: ./server
+    container_name: ra-api
+    restart: unless-stopped
+    environment:
+      PORT: 8080
+      DOCKER_SOCKET: ${DOCKER_SOCKET:-/var/run/docker.sock}
+      DOCKER_NETWORK: remote-android-net
+      REDROID_IMAGE: ${REDROID_IMAGE:-redroid/redroid:12.0.0-latest}
+      GPU_DEVICE: ${GPU_DEVICE:-/dev/dri}
+      SCRCPY_BITRATE: ${SCRCPY_BITRATE:-8000000}
+      SCRCPY_FPS: ${SCRCPY_FPS:-30}
+      DB_PATH: /app/data/remote-android.db
+      SCRCPY_SERVER_PATH: /app/assets/scrcpy-server.jar
+    volumes:
+      # 编排宿主机 Docker:创建/销毁 redroid 实例
+      - /var/run/docker.sock:/var/run/docker.sock
+      - api-data:/app/data
+    networks:
+      - remote-android-net
+    # 默认不对外暴露,由 web 的 nginx 反代;调试时可打开:
+    # ports:
+    #   - "8080:8080"
+
+  web:
+    build: ./web
+    container_name: ra-web
+    restart: unless-stopped
+    depends_on:
+      - api
+    environment:
+      CERT_CN: ${NAS_HOST:-remote-android}
+      CERT_SAN: ${CERT_SAN:-IP:127.0.0.1}
+    ports:
+      - "${WEB_PORT:-8443}:8443"   # 单端口双协议(HTTP/HTTPS 同端口)
+    volumes:
+      - web-certs:/etc/nginx/certs
+    networks:
+      - remote-android-net
+
+  # WebRTC 低延迟链路的媒体服务器(WHEP 播放 + RTSP 收流)
+  mediamtx:
+    image: ${MEDIAMTX_IMAGE:-bluenviron/mediamtx:1.9.3}
+    container_name: ra-mediamtx
+    restart: unless-stopped
+    environment:
+      # 浏览器 ICE 候选地址:局域网填宿主机 IP(本机开发可留空)
+      MTX_WEBRTCADDITIONALHOSTS: ${NAS_HOST:-}
+      MTX_RTSPTRANSPORTS: tcp
+    ports:
+      - "8189:8189/udp"   # WebRTC 媒体通道
+      - "8889:8889"       # WHEP 协商(也可只走 web 的 nginx 反代)
+    networks:
+      - remote-android-net
+
+volumes:
+  api-data:
+  web-certs:

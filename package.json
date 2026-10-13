@@ -1,0 +1,25 @@
+{
+  "name": "remote-android",
+  "version": "0.1.0",
+  "description": "云端安卓模拟器多开管理平台(redroid + scrcpy + WebCodecs)",
+  "private": true,
+  "scripts": {
+    "install:all": "npm run install:server && npm run install:web",
+    "install:server": "cd server && npm install",
+    "install:web": "cd web && npm install",
+    "dev": "concurrently -c cyan,magenta --kill-others --kill-others-on-fail --prefix \"[{name}]\" --names \"SERVER,WEB\" \"npm run dev:server\" \"npm run dev:web\"",
+    "dev:server": "cd server && npm run dev",
+    "dev:web": "cd web && npm run dev",
+    "build": "cd web && npm run build && cd ../server && npm run build",
+    "publish": "node scripts/publish.js",
+    "clean": "rimraf server/node_modules web/node_modules server/dist web/dist"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "rimraf": "^5.0.5",
+    "ssh2": "^1.16.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

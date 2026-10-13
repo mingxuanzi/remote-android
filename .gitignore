@@ -1,0 +1,17 @@
+node_modules/
+dist/
+data/
+*.db
+*.db-journal
+.env
+.DS_Store
+__pycache__/
+*.log
+
+# 发布相关:含密码配置与临时产物不入库
+publish.config.js
+.publish/
+
+# 自测环境(puppeteer 依赖与截图)
+.selftest/node_modules/
+.selftest/*.png
