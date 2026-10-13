@@ -2,6 +2,18 @@
 
 在浏览器里创建、启动、停止、批量多开安卓模拟器实例:实时投屏 + 触控操作,支持宿主机 GPU 渲染,整套平台支持 Docker Compose 一键部署。
 
+## 界面预览
+
+真实运行截图(Docker + redroid 12 实例):
+
+| 实例管理台(批量启动/停止/快照) | 竖屏投屏(WebCodecs 硬解 + 音频) |
+|---|---|
+| ![实例管理台](docs/screenshots/dashboard.png) | ![竖屏投屏](docs/screenshots/player-portrait.png) |
+
+| 横屏模式(一键旋转,视频跟随) | 低延迟 WebRTC 模式(实验,WHEP 播放) |
+|---|---|
+| ![横屏模式](docs/screenshots/player-landscape.png) | ![WebRTC 模式](docs/screenshots/player-webrtc.png) |
+
 ## 架构
 
 ```
