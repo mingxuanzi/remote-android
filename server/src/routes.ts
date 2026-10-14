@@ -7,7 +7,7 @@ import { config } from './config';
 import { instanceStore, templateStore, userStore, InstanceRow, newId } from './db';
 import {
   createAndStart, stopContainer, removeContainer, inspectState,
-  describeError, commitInstance, removeImage, reconcileStatus, launchInstance,
+  describeError, commitInstance, removeImage, reconcileStatus, launchInstance, specOf, resettingInstances,
 } from './docker';
 import { adbInstall, serialOf, waitForBoot } from './adb';
 import {
@@ -83,6 +83,7 @@ router.get('/instances', async (req, res) => {
   const rows = u.role === 'admin' ? instanceStore.list() : instanceStore.listByOwner(u.id);
   const merged = await Promise.all(
     rows.map(async (r) => {
+      if (resettingInstances.has(r.name)) return r; // 退出记录清除中,容器短暂不存在属预期
       const state = await inspectState(r.name);
       const next = reconcileStatus(r.status, state);
       if (next) {
@@ -166,7 +167,7 @@ router.post('/instances/:id/stop', (req, res) => {
   instanceStore.setStatus(row.id, 'stopping');
   void (async () => {
     try {
-      await stopContainer(row.name);
+      await stopContainer(specOf(row));
       instanceStore.setStatus(row.id, 'stopped');
     } catch (e) {
       const st = await inspectState(row.name).catch(() => 'unknown' as const);
@@ -184,7 +185,7 @@ router.post('/instances/:id/restart', (req, res) => {
   instanceStore.setStatus(row.id, 'restarting');
   void (async () => {
     try {
-      await stopContainer(row.name).catch(() => void 0);
+      await stopContainer(specOf(row), { keepRecord: true }).catch(() => void 0);
       await launchInstance({
         name: row.name, image: row.image,
         width: row.width, height: row.height, dpi: row.dpi, gpuMode: row.gpuMode,
@@ -244,7 +245,7 @@ router.post('/instances/batch', (req, res) => {
       instanceStore.setStatus(id, 'stopping');
       void (async () => {
         try {
-          await stopContainer(row.name);
+          await stopContainer(specOf(row));
           instanceStore.setStatus(id, 'stopped');
         } catch (e) {
           const st = await inspectState(row.name).catch(() => 'unknown' as const);

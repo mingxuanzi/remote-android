@@ -1,6 +1,7 @@
 import Dockerode from 'dockerode';
 import { config } from './config';
 import { InstanceRow } from './db';
+import { adbPoweroff, serialOf } from './adb';
 
 const docker = new Dockerode({ socketPath: config.dockerSocket });
 
@@ -13,6 +14,26 @@ export interface CreateSpec {
   gpuMode: 'host' | 'guest';
   cpus: number;
   memoryMb: number;
+}
+
+/** 停止实例时把容器写层 commit 成的"运行镜像"标签前缀 */
+const RUN_IMAGE_PREFIX = 'ra-run-';
+
+/** 正在清除退出记录的实例:commit→改名→重建期间容器会短暂不存在,
+ *  状态对账/列表查询必须跳过这些实例,避免把中间态写成"容器不存在" */
+export const resettingInstances = new Set<string>();
+
+export function runImageRef(name: string): string {
+  return `${RUN_IMAGE_PREFIX}${name.toLowerCase()}`;
+}
+
+/** 由台账行构造容器规格(停止/恢复流程重建容器时需要与创建时一致的参数) */
+export function specOf(row: InstanceRow): CreateSpec {
+  return {
+    name: row.name, image: row.image,
+    width: row.width, height: row.height, dpi: row.dpi, gpuMode: row.gpuMode,
+    cpus: row.cpus, memoryMb: row.memoryMb,
+  };
 }
 
 /** 确保编排网络存在(api 与 redroid 实例在同一网络,adb 直连实例名:5555) */
@@ -47,17 +68,14 @@ function redroidCmd(spec: CreateSpec): string[] {
   ];
 }
 
-export async function createAndStart(spec: CreateSpec): Promise<void> {
-  await ensureNetwork();
-  await ensureImage(spec.image);
-
+function containerConfig(spec: CreateSpec, image: string): Dockerode.ContainerCreateOptions {
   const devices =
     spec.gpuMode === 'host'
       ? [{ PathOnHost: config.gpuDevice, PathInContainer: config.gpuDevice, CgroupPermissions: 'rwm' }]
       : [];
 
-  const container = await docker.createContainer({
-    Image: spec.image,
+  return {
+    Image: image,
     name: spec.name,
     Cmd: redroidCmd(spec),
     ExposedPorts: { '5555/tcp': {} },
@@ -71,7 +89,13 @@ export async function createAndStart(spec: CreateSpec): Promise<void> {
       NanoCpus: Math.max(1, Math.round(spec.cpus)) * 1e9,
       Memory: Math.max(256, Math.round(spec.memoryMb)) * 1024 * 1024,
     },
-  });
+  };
+}
+
+export async function createAndStart(spec: CreateSpec): Promise<void> {
+  await ensureNetwork();
+  await ensureImage(spec.image);
+  const container = await docker.createContainer(containerConfig(spec, spec.image));
   await container.start();
 }
 
@@ -79,8 +103,84 @@ export async function startContainer(name: string): Promise<void> {
   await docker.getContainer(name).start();
 }
 
-export async function stopContainer(name: string): Promise<void> {
-  await docker.getContainer(name).stop({ t: 10 });
+/** 等待容器退出(容器不存在也视为已退出);超时返回 false */
+async function waitExited(name: string, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if ((await inspectState(name)) !== 'running') return true;
+    if (Date.now() >= deadline) return false;
+    await new Promise((r) => setTimeout(r, 1_000));
+  }
+}
+
+/** 清除容器退出记录:redroid 的 Android init 不处理 SIGTERM,docker stop 超时只能 SIGKILL(退出码 137);
+ *  即便先经 adb 优雅关机,init 调 reboot(2) 后容器也会带 SIGINT(130) 退出 ——
+ *  fnOS 等外部 Docker 面板把非 0 退出显示为"容器错误退出"。
+ *  这里把已停止容器 commit 成运行镜像(写层含 /data 等全部数据),再重建一个"从未启动"的容器承接原名字:
+ *  数据、快照、启停全不受影响,外部面板看到的是干净的已停止状态。
+ *  任一步失败都保持原容器不动(仅外部面板继续显示退出码),不影响实例本身。 */
+export async function resetExitRecord(spec: CreateSpec): Promise<void> {
+  const container = docker.getContainer(spec.name);
+  const info = await container.inspect().catch(() => null);
+  if (!info || info.State.Running || info.State.ExitCode === 0) return;
+  if (resettingInstances.has(spec.name)) return; // 已有一次清除在途
+
+  resettingInstances.add(spec.name);
+  try {
+    const repo = runImageRef(spec.name);
+    const oldTags = await docker
+      .getImage(info.Image)
+      .inspect()
+      .then((i) => i.RepoTags ?? [])
+      .catch(() => [] as string[]);
+
+    const committed = await container.commit({
+      repo,
+      tag: 'latest',
+      pause: true,
+      comment: 'RemoteAndroid stop snapshot',
+    });
+
+    const parked = `${spec.name}-old-${Date.now().toString(36)}`;
+    await container.rename({ name: parked });
+    try {
+      await ensureNetwork();
+      await docker.createContainer(containerConfig(spec, `${repo}:latest`));
+    } catch (e) {
+      // 创建失败:旧容器改名还原,保持可启停
+      await docker.getContainer(parked).rename({ name: spec.name }).catch(() => void 0);
+      throw e;
+    }
+    await docker.getContainer(parked).remove({ force: true }).catch(() => void 0);
+
+    // 回收上一代运行镜像(只清理本实例的 ra-run 标签;共享的基础镜像有其它引用,不动)
+    if (committed?.Id && committed.Id !== info.Image && oldTags.some((t) => t.startsWith(`${repo}:`))) {
+      await docker.getImage(info.Image).remove({ force: true }).catch(() => void 0);
+    }
+  } finally {
+    resettingInstances.delete(spec.name);
+  }
+}
+
+/** 停止实例:先让 Android 正常关机(容器自行退出,数据落盘),adb 不可达时兜底 docker stop;
+ *  最后清除非 0 退出记录(见 resetExitRecord)。
+ *  keepRecord=true 用于"重启"(容器马上会被重新启动,退出记录会被运行状态覆盖)。 */
+export async function stopContainer(spec: CreateSpec, opts: { keepRecord?: boolean } = {}): Promise<void> {
+  let graceful = false;
+  try {
+    await adbPoweroff(serialOf(spec.name));
+    graceful = true; // 关机指令已送达,等容器自行退出
+  } catch {
+    /* adb 不可达(实例未启动完成/已退出):直接兜底 docker stop */
+  }
+  if (!graceful || !(await waitExited(spec.name, 20_000))) {
+    await docker.getContainer(spec.name).stop({ t: 10 });
+  }
+  if (!opts.keepRecord) {
+    await resetExitRecord(spec).catch((e) => {
+      console.warn(`清除实例 ${spec.name} 的退出记录失败(不影响启停):`, describeError(e));
+    });
+  }
 }
 
 export async function removeContainer(name: string): Promise<void> {
@@ -91,6 +191,8 @@ export async function removeContainer(name: string): Promise<void> {
     /* 已停止则忽略 */
   }
   await container.remove({ force: true });
+  // 顺带回收停止流程留下的运行镜像(标签级清理,共享层由其它镜像引用保留)
+  await docker.getImage(`${runImageRef(name)}:latest`).remove({ force: true }).catch(() => void 0);
 }
 
 /** 启动实例:容器在则直接启动,不在则按规格重建。

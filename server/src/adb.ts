@@ -14,8 +14,18 @@ export function adb(args: string[], timeoutMs = 60_000): Promise<string> {
   });
 }
 
-export async function adbConnect(serial: string): Promise<void> {
-  await adb(['connect', serial]);
+export async function adbConnect(serial: string, timeoutMs = 60_000): Promise<string> {
+  return adb(['connect', serial], timeoutMs);
+}
+
+/** 通知 Android 正常关机(init 走完关机流程后容器自行退出):
+ *  docker stop 的 SIGTERM 会被 redroid 的 init 忽略,最终只能 SIGKILL(退出码 137)。
+ *  adb connect 无论成败都以 0 退出,需按输出判断连接是否建立,连不上时抛错让调用方走兜底;
+ *  关机指令送达后设备立即断开,shell 命令多半以报错收场,送达即视为成功。 */
+export async function adbPoweroff(serial: string): Promise<void> {
+  const out = await adbConnect(serial, 8_000);
+  if (!/connected to /i.test(out)) throw new Error(out.trim() || `adb 连接失败: ${serial}`);
+  await adbShell(serial, 'reboot -p', 10_000).catch(() => void 0);
 }
 
 export async function adbShell(serial: string, cmd: string, timeoutMs = 60_000): Promise<string> {
