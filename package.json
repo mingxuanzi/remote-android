@@ -12,7 +12,8 @@
     "dev:web": "cd web && npm run dev",
     "build": "cd web && npm run build && cd ../server && npm run build",
     "publish": "node scripts/publish.js",
-    "clean": "rimraf server/node_modules web/node_modules server/dist web/dist"
+    "clean": "rimraf server/node_modules web/node_modules server/dist web/dist",
+    "setup:wsl-docker": "node scripts/setup-wsl-docker.js"
   },
   "devDependencies": {
     "concurrently": "^8.2.2",

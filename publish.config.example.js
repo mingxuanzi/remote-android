@@ -27,6 +27,21 @@ module.exports = {
   // 可选:构建平台,飞牛 NAS 一般为 linux/amd64
   // platform: 'linux/amd64',
 
+  // 本地用哪台 Docker 引擎构建：
+  //   auto（默认）  本机 docker 已就绪就用本机；否则用 WSL 发行版里的 Docker Engine；
+  //                 都没有才自动启动 Docker Desktop（见 scripts/docker-engine.js）
+  //   desktop      只用 Docker Desktop / 本机 dockerd
+  //   wsl          只在 WSL 里构建（不启动 Docker Desktop）
+  // 一次性安装 WSL 引擎：npm run setup:wsl-docker
+  docker: 'auto',
+  // wslDistro: 'Ubuntu-24.04',
+  // wslUser: 'root',
+  // 构建期代理：本机开着 Clash/mihomo 这类 TUN 代理时，容器内 npm 下载可能中途被掐断
+  // （表现为卡在 npm install），填 'auto' 自动取 WSL 网关 + 下面的端口，或直接填完整地址
+  // buildProxy: 'auto',
+  // buildProxyPort: 10090,
+  // buildNoProxy: 'localhost,127.0.0.1',
+
   // 随发布包一起推送到 NAS 的镜像(NAS 拉不动 Docker Hub 时由本机代拉;
   // NAS 上已存在这些镜像后可改为 [] 节省每次发布的上传流量)
   seedImages: ['redroid/redroid:12.0.0-latest'],

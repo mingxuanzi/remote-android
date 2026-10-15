@@ -95,6 +95,17 @@ npm install        # 装根目录依赖(ssh2)
 npm run publish    # 一键发布
 ```
 
+不启动 Docker Desktop 也能发布:构建用哪台 Docker 引擎由 `scripts/docker-engine.js` 按
+**本机 dockerd → WSL 发行版里的 Docker Engine → 自动启动 Docker Desktop** 的顺序挑选。
+在 WSL 里装一次引擎即可(装完 Docker Desktop 可以一直不开):
+
+```bash
+npm run setup:wsl-docker          # 默认 Ubuntu-24.04;可加 `-- Debian` 指定发行版
+```
+
+`publish.config.js` 里可用 `docker: 'auto' | 'desktop' | 'wsl'` 强制指定引擎,
+`wslDistro` / `wslUser`(默认 root)指定 WSL 发行版与执行用户。
+
 发布后**单端口双协议**(8443,nginx stream 层 TLS 嗅探分流):
 
 | 入口 | 说明 |

@@ -1,129 +1,13 @@
-const { execSync, spawn } = require('child_process')
 const fs = require('fs')
 const path = require('path')
-const zlib = require('zlib')
-const { pipeline } = require('stream/promises')
 const { Client } = require('ssh2')
+const { resolveEngine, shQuote } = require('./docker-engine')
 
 const ROOT = path.join(__dirname, '..')
 const VERSION_FILE = path.join(ROOT, 'version.txt')
 const CONFIG_FILE = path.join(ROOT, 'publish.config.js')
 const EXAMPLE_FILE = path.join(ROOT, 'publish.config.example.js')
 const PUBLISH_DIR = path.join(ROOT, '.publish')
-
-function run(cmd, opts = {}) {
-  console.log(`\n> ${cmd}`)
-  execSync(cmd, { stdio: 'inherit', cwd: ROOT, ...opts })
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms))
-}
-
-function isDockerReady() {
-  try {
-    execSync('docker info', {
-      stdio: 'pipe',
-      timeout: 15000,
-      windowsHide: true
-    })
-    return true
-  } catch {
-    return false
-  }
-}
-
-function hasDockerCli() {
-  try {
-    execSync('docker version --format "{{.Client.Version}}"', {
-      stdio: 'pipe',
-      timeout: 10000,
-      windowsHide: true
-    })
-    return true
-  } catch {
-    return false
-  }
-}
-
-function findDockerDesktopExe() {
-  const candidates = [
-    path.join(process.env.ProgramFiles || 'C:\\Program Files', 'Docker', 'Docker', 'Docker Desktop.exe'),
-    path.join(process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'Docker', 'Docker', 'Docker Desktop.exe'),
-    path.join(process.env.LOCALAPPDATA || '', 'Docker', 'Docker Desktop.exe')
-  ]
-  return candidates.find((p) => p && fs.existsSync(p)) || null
-}
-
-function isDockerDesktopRunning() {
-  if (process.platform !== 'win32') return false
-  try {
-    const out = execSync('tasklist /FI "IMAGENAME eq Docker Desktop.exe" /FO CSV /NH', {
-      encoding: 'utf8',
-      stdio: ['pipe', 'pipe', 'pipe'],
-      windowsHide: true
-    })
-    return /docker desktop\.exe/i.test(out)
-  } catch {
-    return false
-  }
-}
-
-function startDockerDesktop(exePath) {
-  console.log(` 启动 Docker Desktop: ${exePath}`)
-  const child = spawn(exePath, [], {
-    detached: true,
-    stdio: 'ignore',
-    windowsHide: false
-  })
-  child.unref()
-}
-
-async function ensureDocker(timeoutMs = 180000) {
-  if (isDockerReady()) {
-    console.log(' Docker 已就绪')
-    return
-  }
-
-  if (process.platform !== 'win32') {
-    throw new Error('Docker 未运行，请先启动 Docker 后再发布')
-  }
-
-  const exe = findDockerDesktopExe()
-  if (!exe && !hasDockerCli()) {
-    throw new Error(
-      '未检测到 Docker Desktop，请先安装：https://www.docker.com/products/docker-desktop/'
-    )
-  }
-
-  if (!isDockerDesktopRunning()) {
-    if (!exe) {
-      throw new Error('Docker 未运行，且未找到 Docker Desktop.exe，请手动启动后再发布')
-    }
-    startDockerDesktop(exe)
-  } else {
-    console.log(' Docker Desktop 已在启动中，等待引擎就绪...')
-  }
-
-  const deadline = Date.now() + timeoutMs
-  let waited = 0
-  while (Date.now() < deadline) {
-    await sleep(3000)
-    waited += 3
-    process.stdout.write(`\r 等待 Docker 引擎就绪... ${waited}s`)
-    if (isDockerReady()) {
-      process.stdout.write('\n')
-      console.log(' Docker Desktop 已就绪')
-      return
-    }
-  }
-  process.stdout.write('\n')
-  throw new Error(`等待 Docker Desktop 启动超时（${Math.round(timeoutMs / 1000)}s），请手动打开后再发布`)
-}
-
-function shQuote(value) {
-  return `'${String(value).replace(/'/g, `'\\''`)}'`
-}
 
 function readVersion() {
   if (!fs.existsSync(VERSION_FILE)) {
@@ -177,6 +61,14 @@ function loadConfig() {
     sudo: !!config.sudo,
     sudoPassword: config.sudoPassword || config.password,
     keepRemoteTar: !!config.keepRemoteTar,
+    // 本地构建用哪台引擎：auto（默认，本机→WSL→Docker Desktop）/ desktop / wsl
+    docker: config.docker || 'auto',
+    wslDistro: config.wslDistro || '',
+    wslUser: config.wslUser || 'root',
+    // 构建期代理：本机开着 Clash/mihomo 等 TUN 代理时填 'auto' 或 'http://ip:port'
+    buildProxy: config.buildProxy || '',
+    buildProxyPort: config.buildProxyPort || 10090,
+    buildNoProxy: config.buildNoProxy || '',
     compose: String(config.compose).trim()
   }
 }
@@ -293,35 +185,10 @@ function uploadFile(conn, localPath, remotePath) {
   })
 }
 
-async function saveImagesGzip(imageTags, destGz) {
-  const child = spawn('docker', ['save', ...imageTags], {
-    cwd: ROOT,
-    stdio: ['ignore', 'pipe', 'inherit']
-  })
-  const exitPromise = new Promise((resolve, reject) => {
-    child.on('error', reject)
-    child.on('close', resolve)
-  })
-  try {
-    await pipeline(
-      child.stdout,
-      zlib.createGzip({ level: 6 }),
-      fs.createWriteStream(destGz)
-    )
-  } catch (err) {
-    await exitPromise.catch(() => {})
-    throw err
-  }
-  const exitCode = await exitPromise
-  if (exitCode !== 0) {
-    throw new Error(`docker save 退出码 ${exitCode}`)
-  }
-}
-
-async function tryPull(image) {
+async function tryPull(docker, image) {
   // 基础镜像本地已有时，离线环境 docker pull 会卡住整个发布；失败则用本地镜像继续（build 已 --pull=false）
   try {
-    run(`docker pull ${image}`)
+    docker.runShell(`docker pull ${image}`)
   } catch {
     console.log(`  docker pull ${image} 失败（可能离线/镜像已存在），使用本地镜像继续构建`)
   }
@@ -354,26 +221,27 @@ async function main() {
   console.log(` 目标: ${config.username}@${config.host}:${config.remoteDir}`)
   console.log('============================================')
 
-  console.log('\n[1/6] 检查本机 Docker...')
-  await ensureDocker()
-  run('docker version')
+  console.log('\n[1/6] 准备 Docker 引擎...')
+  const docker = await resolveEngine(config, ROOT)
+  console.log(` 引擎: ${docker.label}`)
+  docker.runShell('docker version')
 
   console.log('\n[2/6] 构建 api/web 两个镜像...')
-  await tryPull('node:20-bookworm')
-  await tryPull('nginx:1.27-alpine')
+  await tryPull(docker, 'node:20-bookworm')
+  await tryPull(docker, 'nginx:1.27-alpine')
   const platformFlag = config.platform ? ` --platform ${config.platform}` : ''
-  run(`docker build${platformFlag} --pull=false -t ${apiTag} ./server`)
-  run(`docker build${platformFlag} --pull=false -t ${webTag} ./web`)
+  docker.runShell(`docker build${platformFlag}${docker.buildProxyArgs()} --pull=false -t ${apiTag} ./server`)
+  docker.runShell(`docker build${platformFlag}${docker.buildProxyArgs()} --pull=false -t ${webTag} ./web`)
 
   // 可选:把 redroid 等种子镜像一起打包(NAS 访问不了 Docker Hub 时,由本机代拉)
   for (const seed of config.seedImages) {
     console.log(`\n 拉取种子镜像 ${seed}(随包推送到 NAS)...`)
-    await tryPull(seed)
+    await tryPull(docker, seed)
   }
 
   console.log('\n[3/6] 导出离线镜像(多镜像合并打包)...')
   if (fs.existsSync(localTar)) fs.unlinkSync(localTar)
-  await saveImagesGzip([apiTag, webTag, ...config.seedImages], localTar)
+  await docker.saveGzip([apiTag, webTag, ...config.seedImages], localTar)
   console.log(` 已生成 ${localTar} (${formatBytes(fs.statSync(localTar).size)})`)
 
   console.log('\n[4/6] 上传到飞牛 NAS...')
