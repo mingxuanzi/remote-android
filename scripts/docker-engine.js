@@ -43,20 +43,25 @@ function toTagList(imageTags) {
 function buildProxyArgs(config, kind, capture) {
   let proxy = String((config && config.buildProxy) || '').trim()
   if (!proxy) return ''
+  const port = Number((config && config.buildProxyPort) || 10090)
   if (proxy === 'auto') {
-    if (kind !== 'wsl' || typeof capture !== 'function') {
-      console.log(' 提示: buildProxy=auto 只支持 WSL 引擎，本机引擎请填完整地址')
+    if (kind === 'wsl' && typeof capture === 'function') {
+      let gateway = ''
+      try {
+        // 注意：命令经 wsl.exe 传递时 $ 会被吞掉，这里避免使用 awk 的 $N
+        gateway = capture("ip route 2>/dev/null | head -1 | cut -d' ' -f3")
+      } catch {
+        gateway = ''
+      }
+      if (!/^[0-9.]+$/.test(gateway)) return ''
+      proxy = `http://${gateway}:${port}`
+    } else if (isWindows()) {
+      // 本机引擎（Docker Desktop）：容器里用 host.docker.internal 指向宿主机
+      proxy = `http://host.docker.internal:${port}`
+    } else {
+      console.log(' 提示: buildProxy=auto 在非 Windows 本机引擎下无法自动推导，请填完整地址')
       return ''
     }
-    let gateway = ''
-    try {
-      // 注意：命令经 wsl.exe 传递时 $ 会被吞掉，这里避免使用 awk 的 $N
-      gateway = capture("ip route 2>/dev/null | head -1 | cut -d' ' -f3")
-    } catch {
-      gateway = ''
-    }
-    if (!/^[0-9.]+$/.test(gateway)) return ''
-    proxy = `http://${gateway}:${Number((config && config.buildProxyPort) || 10090)}`
   }
   const noProxy = String((config && config.buildNoProxy) || 'localhost,127.0.0.1')
   const entries = [
